@@ -2,11 +2,17 @@ const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2");
 const Pusher = require("pusher");
+const fs = require("fs");
+
 
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: '*', // Allow all origins for now (you can restrict to your Vercel URL later)
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
-const fs = require("fs");
 
 // Create MySQL CONNECTION POOL - FIXED SSL CERTIFICATE ISSUE
 const db = mysql.createPool({
