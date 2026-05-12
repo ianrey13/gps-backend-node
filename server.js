@@ -17,8 +17,15 @@ app.use(express.json());
 // Helper function to convert ISO to MySQL datetime
 function toMySQLDateTime(isoString) {
     if (!isoString) return null;
+    // Parse the ISO string and format as YYYY-MM-DD HH:MM:SS
     const date = new Date(isoString);
-    return date.toISOString().slice(0, 19).replace('T', ' ');
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
 // Create MySQL CONNECTION POOL
@@ -141,10 +148,10 @@ app.get("/api/locations", (req, res) => {
 app.post("/api/trips/start", (req, res) => {
   const { id, name, startTime, startLat, startLng, device_id } = req.body;
   
-  // Convert ISO datetime to MySQL format
+  // Convert ISO datetime to MySQL format using the improved function
   const mysqlStartTime = toMySQLDateTime(startTime);
   
-  console.log("🚀 Starting trip:", { id, name, device_id, startTime: mysqlStartTime });
+  console.log("🚀 Starting trip:", { id, name, device_id, originalTime: startTime, convertedTime: mysqlStartTime });
   
   const sql = `INSERT INTO trips (trip_id, device_id, name, start_time, start_lat, start_lng, status) 
                VALUES (?, ?, ?, ?, ?, ?, 'active')`;
@@ -176,7 +183,7 @@ app.post("/api/trips/end", (req, res) => {
   // Convert ISO datetime to MySQL format
   const mysqlEndTime = toMySQLDateTime(endTime);
   
-  console.log("🏁 Ending trip:", { id, distance: (distance / 1000).toFixed(2) + "km", duration, endTime: mysqlEndTime });
+  console.log("🏁 Ending trip:", { id, distance: (distance / 1000).toFixed(2) + "km", duration, convertedTime: mysqlEndTime });
   
   const sql = `UPDATE trips 
                SET end_time = ?, end_lat = ?, end_lng = ?, duration = ?, 
@@ -204,7 +211,7 @@ app.post("/api/trips/end", (req, res) => {
 });
 
 // Get all trips (history)
-app.get("/api/trips/", (req, res) => {
+app.get("/api/trips", (req, res) => {
   const deviceId = req.query.device_id;
   
   let sql = "SELECT * FROM trips ORDER BY start_time DESC LIMIT 50";
