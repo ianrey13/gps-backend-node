@@ -2,50 +2,64 @@ const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2');
 const Pusher = require('pusher');
-require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Database connection (use environment variables)
-const db = mysql.createConnection({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'realtime_monitor'
+// Create MySQL CONNECTION POOL - FIXED SSL CERTIFICATE ISSUE
+const db = mysql.createPool({
+    host: 'mysql-3e840356-iubaub4-5ef3.h.aivencloud.com',
+    port: 13853,
+    user: 'avnadmin',
+    password: 'AVNS_k2C0gQBrf_AR4GFV6G0',
+    database: 'realtime_monitoring',
+    ssl: {
+        rejectUnauthorized: false  // THIS FIXES THE SSL CERTIFICATE ERROR
+    },
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0
 });
 
-db.connect((err) => {
+// Test connection
+db.getConnection((err, connection) => {
     if (err) {
-        console.error('Database connection failed:', err);
+        console.error('❌ Database connection failed:', err);
     } else {
-        console.log('Connected to database');
+        console.log('✅ Connected to Aiven MySQL database');
+        connection.release();
     }
 });
 
-// Pusher setup for real-time
+// Pusher setup
 const pusher = new Pusher({
-    appId: process.env.PUSHER_APP_ID || '1474be695528c4258e23',
-    key: process.env.PUSHER_KEY || '1474be695528c4258e23',
-    secret: process.env.PUSHER_SECRET || 'your-pusher-secret',
+    appId: '2153708',
+    key: '32be18924a54faaf0cb6',
+    secret: '09eed306de2e869d4782',
     cluster: 'ap1',
     useTLS: true
 });
 
-// API endpoint to receive location from mobile
+console.log('🔌 Pusher configured');
+
+// Receive location from mobile
 app.post('/api/locations', (req, res) => {
     const { device_id, latitude, longitude, accuracy, speed, battery_level } = req.body;
+    
+    console.log('📍 Received location:', { device_id, latitude, longitude });
     
     const sql = 'INSERT INTO locations (device_id, latitude, longitude, accuracy, speed, battery_level, timestamp) VALUES (?, ?, ?, ?, ?, ?, NOW())';
     
     db.query(sql, [device_id, latitude, longitude, accuracy || null, speed || null, battery_level || null], (err, result) => {
         if (err) {
-            console.error('Error saving location:', err);
+            console.error('❌ Database error:', err);
             return res.status(500).json({ error: err.message });
         }
         
-        // Trigger Pusher event for real-time updates
+        // Send real-time update via Pusher
         pusher.trigger('locations', 'LocationUpdated', {
             id: result.insertId,
             device_id,
@@ -57,11 +71,12 @@ app.post('/api/locations', (req, res) => {
             timestamp: new Date()
         });
         
+        console.log('✅ Location saved and broadcasted');
         res.json({ success: true, id: result.insertId });
     });
 });
 
-// Get latest locations
+// Get locations
 app.get('/api/locations', (req, res) => {
     const limit = req.query.limit || 100;
     const deviceId = req.query.device_id;
@@ -76,16 +91,18 @@ app.get('/api/locations', (req, res) => {
     
     db.query(sql, params, (err, results) => {
         if (err) {
+            console.error('❌ Query error:', err);
             return res.status(500).json({ error: err.message });
         }
         res.json({ success: true, data: results });
     });
 });
 
-// Get unique devices
+// Get devices
 app.get('/api/devices', (req, res) => {
     db.query('SELECT DISTINCT device_id FROM locations ORDER BY device_id', (err, results) => {
         if (err) {
+            console.error('❌ Devices query error:', err);
             return res.status(500).json({ error: err.message });
         }
         const devices = results.map(r => r.device_id);
@@ -95,10 +112,41 @@ app.get('/api/devices', (req, res) => {
 
 // Health check
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date() });
+    db.query('SELECT 1', (err, results) => {
+        if (err) {
+            console.error('❌ Health check failed:', err);
+            return res.status(500).json({ status: 'error', db: 'disconnected', error: err.message });
+        }
+        res.json({ status: 'ok', db: 'connected', timestamp: new Date() });
+    });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'GPS Tracking API',
+        endpoints: [
+            'POST /api/locations - Send location',
+            'GET /api/locations - Get locations',
+            'GET /api/devices - Get devices',
+            'GET /api/health - Health check'
+        ]
+    });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📡 API URL: http://localhost:${PORT}/api`);
+    console.log(`✅ Database: realtime_monitoring`);
+    console.log(`🔌 Pusher Key: 32be18924a54faaf0cb6`);
+});
+
+// Handle process termination
+process.on('SIGINT', () => {
+    console.log('Shutting down gracefully...');
+    db.end(() => {
+        console.log('Database connections closed');
+        process.exit(0);
+    });
 });
