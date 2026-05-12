@@ -7,14 +7,21 @@ const fs = require("fs");
 
 const app = express();
 app.use(cors({
-    origin: '*', // Allow all origins for now (you can restrict to your Vercel URL later)
+    origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json());
 
-// Create MySQL CONNECTION POOL - FIXED SSL CERTIFICATE ISSUE
+// Helper function to convert ISO to MySQL datetime
+function toMySQLDateTime(isoString) {
+    if (!isoString) return null;
+    const date = new Date(isoString);
+    return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+// Create MySQL CONNECTION POOL
 const db = mysql.createPool({
   host: "mysql-3e840356-iubaub4-5ef3.h.aivencloud.com",
   port: 13853,
@@ -82,7 +89,6 @@ app.post("/api/locations", (req, res) => {
         return res.status(500).json({ error: err.message });
       }
 
-      // Send real-time update via Pusher
       pusher.trigger("locations", "LocationUpdated", {
         id: result.insertId,
         device_id,
@@ -131,22 +137,24 @@ app.get("/api/locations", (req, res) => {
 
 // ==================== TRIP ENDPOINTS ====================
 
-// Start a trip
+// Start a trip - FIXED datetime conversion
 app.post("/api/trips/start", (req, res) => {
   const { id, name, startTime, startLat, startLng, device_id } = req.body;
   
-  console.log("🚀 Starting trip:", { id, name, device_id });
+  // Convert ISO datetime to MySQL format
+  const mysqlStartTime = toMySQLDateTime(startTime);
+  
+  console.log("🚀 Starting trip:", { id, name, device_id, startTime: mysqlStartTime });
   
   const sql = `INSERT INTO trips (trip_id, device_id, name, start_time, start_lat, start_lng, status) 
                VALUES (?, ?, ?, ?, ?, ?, 'active')`;
   
-  db.query(sql, [id, device_id, name, startTime, startLat, startLng], (err, result) => {
+  db.query(sql, [id, device_id, name, mysqlStartTime, startLat, startLng], (err, result) => {
     if (err) {
       console.error("❌ Error starting trip:", err);
       return res.status(500).json({ error: err.message });
     }
     
-    // Broadcast trip start via Pusher
     pusher.trigger("locations", "TripStarted", {
       trip_id: id,
       device_id,
@@ -161,24 +169,26 @@ app.post("/api/trips/start", (req, res) => {
   });
 });
 
-// End a trip
+// End a trip - FIXED datetime conversion
 app.post("/api/trips/end", (req, res) => {
   const { id, endTime, endLat, endLng, duration, distance, avgSpeed, maxSpeed, pointsCount } = req.body;
   
-  console.log("🏁 Ending trip:", { id, distance: (distance / 1000).toFixed(2) + "km", duration });
+  // Convert ISO datetime to MySQL format
+  const mysqlEndTime = toMySQLDateTime(endTime);
+  
+  console.log("🏁 Ending trip:", { id, distance: (distance / 1000).toFixed(2) + "km", duration, endTime: mysqlEndTime });
   
   const sql = `UPDATE trips 
                SET end_time = ?, end_lat = ?, end_lng = ?, duration = ?, 
                    distance = ?, avg_speed = ?, max_speed = ?, points_count = ?, status = 'completed'
                WHERE trip_id = ?`;
   
-  db.query(sql, [endTime, endLat, endLng, duration, distance, avgSpeed, maxSpeed, pointsCount, id], (err, result) => {
+  db.query(sql, [mysqlEndTime, endLat, endLng, duration, distance, avgSpeed, maxSpeed, pointsCount, id], (err, result) => {
     if (err) {
       console.error("❌ Error ending trip:", err);
       return res.status(500).json({ error: err.message });
     }
     
-    // Broadcast trip end via Pusher
     pusher.trigger("locations", "TripEnded", {
       trip_id: id,
       end_lat: endLat,
@@ -194,7 +204,7 @@ app.post("/api/trips/end", (req, res) => {
 });
 
 // Get all trips (history)
-app.get("/api/trips", (req, res) => {
+app.get("/api/trips/", (req, res) => {
   const deviceId = req.query.device_id;
   
   let sql = "SELECT * FROM trips ORDER BY start_time DESC LIMIT 50";
@@ -218,7 +228,6 @@ app.get("/api/trips", (req, res) => {
 app.get("/api/trips/:tripId", (req, res) => {
   const { tripId } = req.params;
   
-  // Get trip info
   db.query("SELECT * FROM trips WHERE trip_id = ?", [tripId], (err, tripResults) => {
     if (err) {
       return res.status(500).json({ error: err.message });
@@ -228,7 +237,6 @@ app.get("/api/trips/:tripId", (req, res) => {
       return res.status(404).json({ error: "Trip not found" });
     }
     
-    // Get all locations for this trip
     db.query("SELECT * FROM locations WHERE trip_id = ? ORDER BY timestamp ASC", [tripId], (err, locationResults) => {
       if (err) {
         return res.status(500).json({ error: err.message });
@@ -259,7 +267,6 @@ app.get("/api/trips/active/current", (req, res) => {
 
 // ==================== DEVICE ENDPOINTS ====================
 
-// Get devices
 app.get("/api/devices", (req, res) => {
   db.query(
     "SELECT DISTINCT device_id FROM locations ORDER BY device_id",
@@ -276,7 +283,6 @@ app.get("/api/devices", (req, res) => {
 
 // ==================== HEALTH & ROOT ====================
 
-// Health check
 app.get("/api/health", (req, res) => {
   db.query("SELECT 1", (err, results) => {
     if (err) {
@@ -289,7 +295,6 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Root endpoint
 app.get("/", (req, res) => {
   res.json({
     status: "GPS Tracking API",
@@ -317,7 +322,6 @@ app.listen(PORT, () => {
   console.log(`📊 Trip tracking endpoints enabled`);
 });
 
-// Handle process termination
 process.on("SIGINT", () => {
   console.log("Shutting down gracefully...");
   db.end(() => {
