@@ -23,8 +23,7 @@ const db = mysql.createPool({
   database: "realtime_monitoring",
   ssl: {
     ca: fs.readFileSync("./ca.pem"),
-
-    rejectUnauthorized: true, // THIS FIXES THE SSL CERTIFICATE ERROR
+    rejectUnauthorized: true,
   },
   waitForConnections: true,
   connectionLimit: 10,
@@ -54,15 +53,16 @@ const pusher = new Pusher({
 
 console.log("🔌 Pusher configured");
 
-// Receive location from mobile
+// ==================== LOCATION ENDPOINTS ====================
+
+// Receive location from mobile (with trip support)
 app.post("/api/locations", (req, res) => {
-  const { device_id, latitude, longitude, accuracy, speed, battery_level } =
-    req.body;
+  const { device_id, latitude, longitude, accuracy, speed, battery_level, trip_id, trip_active, trip_name } = req.body;
 
-  console.log("📍 Received location:", { device_id, latitude, longitude });
+  console.log("📍 Received location:", { device_id, latitude, longitude, trip_active });
 
-  const sql =
-    "INSERT INTO locations (device_id, latitude, longitude, accuracy, speed, battery_level, timestamp) VALUES (?, ?, ?, ?, ?, ?, NOW())";
+  const sql = `INSERT INTO locations (device_id, latitude, longitude, accuracy, speed, battery_level, timestamp, trip_id, trip_active) 
+               VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`;
 
   db.query(
     sql,
@@ -73,6 +73,8 @@ app.post("/api/locations", (req, res) => {
       accuracy || null,
       speed || null,
       battery_level || null,
+      trip_id || null,
+      trip_active || false
     ],
     (err, result) => {
       if (err) {
@@ -89,6 +91,9 @@ app.post("/api/locations", (req, res) => {
         accuracy,
         speed,
         battery_level,
+        trip_id: trip_id || null,
+        trip_active: trip_active || false,
+        trip_name: trip_name || null,
         timestamp: new Date(),
       });
 
@@ -98,17 +103,20 @@ app.post("/api/locations", (req, res) => {
   );
 });
 
-// Get locations
+// Get locations with optional trip filter
 app.get("/api/locations", (req, res) => {
   const limit = req.query.limit || 100;
   const deviceId = req.query.device_id;
+  const tripId = req.query.trip_id;
 
   let sql = "SELECT * FROM locations ORDER BY timestamp DESC LIMIT ?";
   let params = [parseInt(limit)];
 
-  if (deviceId && deviceId !== "all") {
-    sql =
-      "SELECT * FROM locations WHERE device_id = ? ORDER BY timestamp DESC LIMIT ?";
+  if (tripId) {
+    sql = "SELECT * FROM locations WHERE trip_id = ? ORDER BY timestamp ASC LIMIT ?";
+    params = [tripId, parseInt(limit)];
+  } else if (deviceId && deviceId !== "all") {
+    sql = "SELECT * FROM locations WHERE device_id = ? ORDER BY timestamp DESC LIMIT ?";
     params = [deviceId, parseInt(limit)];
   }
 
@@ -120,6 +128,136 @@ app.get("/api/locations", (req, res) => {
     res.json({ success: true, data: results });
   });
 });
+
+// ==================== TRIP ENDPOINTS ====================
+
+// Start a trip
+app.post("/api/trips/start", (req, res) => {
+  const { id, name, startTime, startLat, startLng, device_id } = req.body;
+  
+  console.log("🚀 Starting trip:", { id, name, device_id });
+  
+  const sql = `INSERT INTO trips (trip_id, device_id, name, start_time, start_lat, start_lng, status) 
+               VALUES (?, ?, ?, ?, ?, ?, 'active')`;
+  
+  db.query(sql, [id, device_id, name, startTime, startLat, startLng], (err, result) => {
+    if (err) {
+      console.error("❌ Error starting trip:", err);
+      return res.status(500).json({ error: err.message });
+    }
+    
+    // Broadcast trip start via Pusher
+    pusher.trigger("locations", "TripStarted", {
+      trip_id: id,
+      device_id,
+      name,
+      start_lat: startLat,
+      start_lng: startLng,
+      start_time: startTime
+    });
+    
+    console.log("✅ Trip started successfully");
+    res.json({ success: true, trip_id: id });
+  });
+});
+
+// End a trip
+app.post("/api/trips/end", (req, res) => {
+  const { id, endTime, endLat, endLng, duration, distance, avgSpeed, maxSpeed, pointsCount } = req.body;
+  
+  console.log("🏁 Ending trip:", { id, distance: (distance / 1000).toFixed(2) + "km", duration });
+  
+  const sql = `UPDATE trips 
+               SET end_time = ?, end_lat = ?, end_lng = ?, duration = ?, 
+                   distance = ?, avg_speed = ?, max_speed = ?, points_count = ?, status = 'completed'
+               WHERE trip_id = ?`;
+  
+  db.query(sql, [endTime, endLat, endLng, duration, distance, avgSpeed, maxSpeed, pointsCount, id], (err, result) => {
+    if (err) {
+      console.error("❌ Error ending trip:", err);
+      return res.status(500).json({ error: err.message });
+    }
+    
+    // Broadcast trip end via Pusher
+    pusher.trigger("locations", "TripEnded", {
+      trip_id: id,
+      end_lat: endLat,
+      end_lng: endLng,
+      end_time: endTime,
+      distance: distance,
+      duration: duration
+    });
+    
+    console.log("✅ Trip ended successfully");
+    res.json({ success: true });
+  });
+});
+
+// Get all trips (history)
+app.get("/api/trips", (req, res) => {
+  const deviceId = req.query.device_id;
+  
+  let sql = "SELECT * FROM trips ORDER BY start_time DESC LIMIT 50";
+  let params = [];
+  
+  if (deviceId && deviceId !== "all") {
+    sql = "SELECT * FROM trips WHERE device_id = ? ORDER BY start_time DESC LIMIT 50";
+    params = [deviceId];
+  }
+  
+  db.query(sql, params, (err, results) => {
+    if (err) {
+      console.error("❌ Trips query error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({ success: true, data: results });
+  });
+});
+
+// Get single trip details with all locations
+app.get("/api/trips/:tripId", (req, res) => {
+  const { tripId } = req.params;
+  
+  // Get trip info
+  db.query("SELECT * FROM trips WHERE trip_id = ?", [tripId], (err, tripResults) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    if (tripResults.length === 0) {
+      return res.status(404).json({ error: "Trip not found" });
+    }
+    
+    // Get all locations for this trip
+    db.query("SELECT * FROM locations WHERE trip_id = ? ORDER BY timestamp ASC", [tripId], (err, locationResults) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      
+      res.json({
+        success: true,
+        data: {
+          trip: tripResults[0],
+          locations: locationResults
+        }
+      });
+    });
+  });
+});
+
+// Get active trips
+app.get("/api/trips/active/current", (req, res) => {
+  const sql = "SELECT * FROM trips WHERE status = 'active' ORDER BY start_time DESC";
+  db.query(sql, (err, results) => {
+    if (err) {
+      console.error("❌ Active trips query error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({ success: true, data: results });
+  });
+});
+
+// ==================== DEVICE ENDPOINTS ====================
 
 // Get devices
 app.get("/api/devices", (req, res) => {
@@ -135,6 +273,8 @@ app.get("/api/devices", (req, res) => {
     },
   );
 });
+
+// ==================== HEALTH & ROOT ====================
 
 // Health check
 app.get("/api/health", (req, res) => {
@@ -153,9 +293,15 @@ app.get("/api/health", (req, res) => {
 app.get("/", (req, res) => {
   res.json({
     status: "GPS Tracking API",
+    version: "2.0.0",
     endpoints: [
       "POST /api/locations - Send location",
       "GET /api/locations - Get locations",
+      "POST /api/trips/start - Start a trip",
+      "POST /api/trips/end - End a trip",
+      "GET /api/trips - Get all trips",
+      "GET /api/trips/:tripId - Get trip details with locations",
+      "GET /api/trips/active/current - Get active trips",
       "GET /api/devices - Get devices",
       "GET /api/health - Health check",
     ],
@@ -168,6 +314,7 @@ app.listen(PORT, () => {
   console.log(`📡 API URL: http://localhost:${PORT}/api`);
   console.log(`✅ Database: realtime_monitoring`);
   console.log(`🔌 Pusher Key: 32be18924a54faaf0cb6`);
+  console.log(`📊 Trip tracking endpoints enabled`);
 });
 
 // Handle process termination
