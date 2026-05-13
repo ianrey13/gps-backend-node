@@ -17,7 +17,6 @@ app.use(express.json());
 // Helper function to convert ISO to MySQL datetime
 function toMySQLDateTime(isoString) {
     if (!isoString) return null;
-    // Parse the ISO string and format as YYYY-MM-DD HH:MM:SS
     const date = new Date(isoString);
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -69,11 +68,17 @@ console.log("🔌 Pusher configured");
 
 // ==================== LOCATION ENDPOINTS ====================
 
-// Receive location from mobile (with trip support)
+// Receive location from mobile (with trip support) - IMPROVED LOGGING
 app.post("/api/locations", (req, res) => {
   const { device_id, latitude, longitude, accuracy, speed, battery_level, trip_id, trip_active, trip_name } = req.body;
 
-  console.log("📍 Received location:", { device_id, latitude, longitude, trip_active });
+  console.log("📍 Received location:", { 
+    device_id, 
+    latitude, 
+    longitude, 
+    trip_active,
+    trip_id: trip_id || 'null'
+  });
 
   const sql = `INSERT INTO locations (device_id, latitude, longitude, accuracy, speed, battery_level, timestamp, trip_id, trip_active) 
                VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`;
@@ -96,6 +101,8 @@ app.post("/api/locations", (req, res) => {
         return res.status(500).json({ error: err.message });
       }
 
+      console.log(`✅ Location saved with trip_id: ${trip_id || 'none'}`);
+      
       pusher.trigger("locations", "LocationUpdated", {
         id: result.insertId,
         device_id,
@@ -110,7 +117,6 @@ app.post("/api/locations", (req, res) => {
         timestamp: new Date(),
       });
 
-      console.log("✅ Location saved and broadcasted");
       res.json({ success: true, id: result.insertId });
     },
   );
@@ -144,11 +150,10 @@ app.get("/api/locations", (req, res) => {
 
 // ==================== TRIP ENDPOINTS ====================
 
-// Start a trip - FIXED datetime conversion
+// Start a trip
 app.post("/api/trips/start", (req, res) => {
   const { id, name, startTime, startLat, startLng, device_id } = req.body;
   
-  // Convert ISO datetime to MySQL format using the improved function
   const mysqlStartTime = toMySQLDateTime(startTime);
   
   console.log("🚀 Starting trip:", { id, name, device_id, originalTime: startTime, convertedTime: mysqlStartTime });
@@ -176,11 +181,10 @@ app.post("/api/trips/start", (req, res) => {
   });
 });
 
-// End a trip - FIXED datetime conversion
+// End a trip
 app.post("/api/trips/end", (req, res) => {
   const { id, endTime, endLat, endLng, duration, distance, avgSpeed, maxSpeed, pointsCount } = req.body;
   
-  // Convert ISO datetime to MySQL format
   const mysqlEndTime = toMySQLDateTime(endTime);
   
   console.log("🏁 Ending trip:", { id, distance: (distance / 1000).toFixed(2) + "km", duration, convertedTime: mysqlEndTime });
@@ -231,12 +235,16 @@ app.get("/api/trips", (req, res) => {
   });
 });
 
-// Get single trip details with all locations
+// Get single trip details with all locations - IMPROVED VERSION with fallback
 app.get("/api/trips/:tripId", (req, res) => {
   const { tripId } = req.params;
   
+  console.log("🔍 Fetching trip details for:", tripId);
+  
+  // Get trip info
   db.query("SELECT * FROM trips WHERE trip_id = ?", [tripId], (err, tripResults) => {
     if (err) {
+      console.error("❌ Trip query error:", err);
       return res.status(500).json({ error: err.message });
     }
     
@@ -244,18 +252,68 @@ app.get("/api/trips/:tripId", (req, res) => {
       return res.status(404).json({ error: "Trip not found" });
     }
     
+    const trip = tripResults[0];
+    console.log("✅ Trip found:", trip.name);
+    console.log("Trip time range:", trip.start_time, "to", trip.end_time);
+    
+    // First try to get locations by trip_id
     db.query("SELECT * FROM locations WHERE trip_id = ? ORDER BY timestamp ASC", [tripId], (err, locationResults) => {
       if (err) {
+        console.error("❌ Locations query error:", err);
         return res.status(500).json({ error: err.message });
       }
       
-      res.json({
-        success: true,
-        data: {
-          trip: tripResults[0],
-          locations: locationResults
-        }
-      });
+      console.log(`📍 Found ${locationResults.length} locations with trip_id = ${tripId}`);
+      
+      // If no locations found by trip_id, try by time range
+      if (locationResults.length === 0 && trip.start_time && trip.end_time) {
+        console.log("⚠️ No locations with trip_id, trying time range query...");
+        
+        db.query(
+          `SELECT * FROM locations 
+           WHERE device_id = ? 
+             AND timestamp BETWEEN DATE_SUB(?, INTERVAL 5 MINUTE) AND DATE_ADD(?, INTERVAL 5 MINUTE)
+           ORDER BY timestamp ASC`,
+          [trip.device_id, trip.start_time, trip.end_time],
+          (err2, timeRangeResults) => {
+            if (err2) {
+              console.error("❌ Time range query error:", err2);
+              return res.status(500).json({ error: err2.message });
+            }
+            
+            console.log(`📍 Found ${timeRangeResults.length} locations by time range`);
+            
+            // Update these locations with the trip_id for future queries
+            if (timeRangeResults.length > 0) {
+              const ids = timeRangeResults.map(loc => loc.id);
+              db.query(
+                `UPDATE locations SET trip_id = ? WHERE id IN (?)`,
+                [tripId, ids],
+                (updateErr) => {
+                  if (updateErr) console.error("Update error:", updateErr);
+                  else console.log(`✅ Updated ${ids.length} locations with trip_id`);
+                }
+              );
+            }
+            
+            res.json({
+              success: true,
+              data: {
+                trip: trip,
+                locations: timeRangeResults || []
+              }
+            });
+          }
+        );
+      } else {
+        res.json({
+          success: true,
+          data: {
+            trip: trip,
+            locations: locationResults || []
+          }
+        });
+      }
     });
   });
 });
