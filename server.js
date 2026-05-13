@@ -68,7 +68,7 @@ console.log("🔌 Pusher configured");
 
 // ==================== LOCATION ENDPOINTS ====================
 
-// Receive location from mobile (with trip support) - IMPROVED LOGGING
+// Receive location from mobile (with trip support)
 app.post("/api/locations", (req, res) => {
   const { device_id, latitude, longitude, accuracy, speed, battery_level, trip_id, trip_active, trip_name } = req.body;
 
@@ -181,7 +181,7 @@ app.post("/api/trips/start", (req, res) => {
   });
 });
 
-// End a trip
+// End a trip - WITH CLEANUP of trip_active flags
 app.post("/api/trips/end", (req, res) => {
   const { id, endTime, endLat, endLng, duration, distance, avgSpeed, maxSpeed, pointsCount } = req.body;
   
@@ -189,6 +189,7 @@ app.post("/api/trips/end", (req, res) => {
   
   console.log("🏁 Ending trip:", { id, distance: (distance / 1000).toFixed(2) + "km", duration, convertedTime: mysqlEndTime });
   
+  // First, update the trip status
   const sql = `UPDATE trips 
                SET end_time = ?, end_lat = ?, end_lng = ?, duration = ?, 
                    distance = ?, avg_speed = ?, max_speed = ?, points_count = ?, status = 'completed'
@@ -199,6 +200,16 @@ app.post("/api/trips/end", (req, res) => {
       console.error("❌ Error ending trip:", err);
       return res.status(500).json({ error: err.message });
     }
+    
+    // CRITICAL FIX: Clear trip_active flag for all locations of this trip
+    const clearSql = `UPDATE locations SET trip_active = FALSE WHERE trip_id = ?`;
+    db.query(clearSql, [id], (clearErr) => {
+      if (clearErr) {
+        console.warn("⚠️ Could not clear trip_active flags:", clearErr);
+      } else {
+        console.log(`✅ Cleared trip_active flags for trip: ${id}`);
+      }
+    });
     
     pusher.trigger("locations", "TripEnded", {
       trip_id: id,
